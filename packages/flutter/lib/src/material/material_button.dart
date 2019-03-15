@@ -73,6 +73,10 @@ class MaterialButton extends StatelessWidget {
 
   /// Called by the underlying [InkWell] widget's [InkWell.onHighlightChanged]
   /// callback.
+  ///
+  /// If [onPressed] changes from null to non-null while a gesture is ongoing,
+  /// this can fire during the build phase (in which case calling
+  /// [State.setState] is not allowed).
   final ValueChanged<bool> onHighlightChanged;
 
   /// Defines the button's base colors, and the defaults for the button's minimum
@@ -219,6 +223,9 @@ class MaterialButton extends StatelessWidget {
   /// The button's highlight and splash are clipped to this shape. If the
   /// button has an elevation, then its drop shadow is defined by this
   /// shape as well.
+  ///
+  /// Defaults to the value from the current [ButtonTheme],
+  /// [ButtonThemeData.shape].
   final ShapeBorder shape;
 
   /// {@macro flutter.widgets.Clip}
@@ -255,6 +262,7 @@ class MaterialButton extends StatelessWidget {
 
     return RawMaterialButton(
       onPressed: onPressed,
+      onHighlightChanged: onHighlightChanged,
       fillColor: color,
       textStyle: theme.textTheme.button.copyWith(color: buttonTheme.getTextColor(this)),
       highlightColor: highlightColor ?? theme.highlightColor,
@@ -266,7 +274,7 @@ class MaterialButton extends StatelessWidget {
         minWidth: minWidth,
         minHeight: height,
       ),
-      shape: buttonTheme.shape,
+      shape: buttonTheme.getShape(this),
       clipBehavior: clipBehavior ?? Clip.none,
       animationDuration: buttonTheme.getAnimationDuration(this),
       child: child,

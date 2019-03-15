@@ -22,7 +22,7 @@ const String defaultAssetBasePath = '.';
 const String defaultManifestPath = 'pubspec.yaml';
 String get defaultDepfilePath => fs.path.join(getBuildDirectory(), 'snapshot_blob.bin.d');
 
-String getDefaultApplicationKernelPath({@required bool trackWidgetCreation}) {
+String getDefaultApplicationKernelPath({ @required bool trackWidgetCreation }) {
   return getKernelPathForTransformerOptions(
     fs.path.join(getBuildDirectory(), 'app.dill'),
     trackWidgetCreation: trackWidgetCreation,
@@ -61,7 +61,7 @@ Future<void> build({
   bool trackWidgetCreation = false,
   String compilationTraceFilePath,
   bool createPatch = false,
-  int buildNumber,
+  String buildNumber,
   String baselineDir,
   List<String> extraFrontEndOptions = const <String>[],
   List<String> extraGenSnapshotOptions = const <String>[],
@@ -85,7 +85,7 @@ Future<void> build({
 
     } else if (!fs.file(compilationTraceFilePath).existsSync()) {
       // Be forgiving if compilation trace file is missing.
-      printError('Warning: Ignoring missing compilation training file $compilationTraceFilePath.');
+      printStatus('No compilation trace available. To optimize performance, consider using --train.');
       final File tmp = fs.systemTempDirectory.childFile('flutterEmptyCompilationTrace.txt');
       compilationTraceFilePath = (tmp..createSync(recursive: true)).path;
 
@@ -165,7 +165,7 @@ Future<AssetBundle> buildAssets({
   String assetDirPath,
   String packagesPath,
   bool includeDefaultFonts = true,
-  bool reportLicensedPackages = false
+  bool reportLicensedPackages = false,
 }) async {
   assetDirPath ??= getAssetBuildDirectory();
   packagesPath ??= fs.path.absolute(PackageMap.globalPackagesPath);
@@ -177,7 +177,7 @@ Future<AssetBundle> buildAssets({
     assetDirPath: assetDirPath,
     packagesPath: packagesPath,
     includeDefaultFonts: includeDefaultFonts,
-    reportLicensedPackages: reportLicensedPackages
+    reportLicensedPackages: reportLicensedPackages,
   );
   if (result != 0)
     return null;
@@ -199,7 +199,7 @@ Future<void> assemble({
   final Map<String, DevFSContent> assetEntries = Map<String, DevFSContent>.from(assetBundle.entries);
   if (kernelContent != null) {
     if (compilationTraceFilePath != null) {
-      final String vmSnapshotData = artifacts.getArtifactPath(Artifact.vmSnapshotData);
+      final String vmSnapshotData = artifacts.getArtifactPath(Artifact.vmSnapshotData, null, buildMode);
       final String isolateSnapshotData = fs.path.join(getBuildDirectory(), _kIsolateSnapshotData);
       final String isolateSnapshotInstr = fs.path.join(getBuildDirectory(), _kIsolateSnapshotInstr);
       assetEntries[_kVMSnapshotData] = DevFSFileContent(fs.file(vmSnapshotData));
@@ -222,15 +222,17 @@ Future<void> assemble({
 }
 
 Future<void> writeBundle(
-    Directory bundleDir, Map<String, DevFSContent> assetEntries) async {
+  Directory bundleDir,
+  Map<String, DevFSContent> assetEntries,
+) async {
   if (bundleDir.existsSync())
     bundleDir.deleteSync(recursive: true);
   bundleDir.createSync(recursive: true);
 
   await Future.wait<void>(
-      assetEntries.entries.map<Future<void>>((MapEntry<String, DevFSContent> entry) async {
-    final File file = fs.file(fs.path.join(bundleDir.path, entry.key));
-    file.parent.createSync(recursive: true);
-    await file.writeAsBytes(await entry.value.contentsAsBytes());
-  }));
+    assetEntries.entries.map<Future<void>>((MapEntry<String, DevFSContent> entry) async {
+      final File file = fs.file(fs.path.join(bundleDir.path, entry.key));
+      file.parent.createSync(recursive: true);
+      await file.writeAsBytes(await entry.value.contentsAsBytes());
+    }));
 }

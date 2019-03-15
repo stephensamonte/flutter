@@ -4,10 +4,12 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show kDoubleTapTimeout, kDoubleTapSlop;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 
 import 'basic.dart';
 import 'container.dart';
@@ -15,9 +17,14 @@ import 'editable_text.dart';
 import 'framework.dart';
 import 'gesture_detector.dart';
 import 'overlay.dart';
+import 'ticker_provider.dart';
 import 'transitions.dart';
 
 export 'package:flutter/services.dart' show TextSelectionDelegate;
+
+/// A duration that controls how often the drag selection update callback is
+/// called.
+const Duration _kDragSelectionUpdateThrottle = Duration(milliseconds: 50);
 
 /// Which type of selection handle to be displayed.
 ///
@@ -62,6 +69,19 @@ enum _TextSelectionHandlePosition { start, end }
 ///
 /// Used by [TextSelectionOverlay.onSelectionOverlayChanged].
 typedef TextSelectionOverlayChanged = void Function(TextEditingValue value, Rect caretRect);
+
+/// Signature for when a pointer that's dragging to select text has moved again.
+///
+/// The first argument [startDetails] contains the details of the event that
+/// initiated the dragging.
+///
+/// The second argument [updateDetails] contains the details of the current
+/// pointer movement. It's the same as the one passed to [DragGestureRecognizer.onUpdate].
+///
+/// This signature is different from [GestureDragUpdateCallback] to make it
+/// easier for various text fields to use [TextSelectionGestureDetector] without
+/// having to store the start position.
+typedef DragSelectionUpdateCallback = void Function(DragStartDetails startDetails, DragUpdateDetails updateDetails);
 
 /// An interface for building the selection UI, to be provided by the
 /// implementor of the toolbar widget.
@@ -206,7 +226,7 @@ abstract class TextSelectionControls {
       text: delegate.textEditingValue.text,
       selection: TextSelection(
         baseOffset: 0,
-        extentOffset: delegate.textEditingValue.text.length
+        extentOffset: delegate.textEditingValue.text.length,
       ),
     );
     delegate.bringIntoView(delegate.textEditingValue.selection.extent);
@@ -229,13 +249,16 @@ class TextSelectionOverlay {
     @required this.renderObject,
     this.selectionControls,
     this.selectionDelegate,
-  }): assert(value != null),
-      assert(context != null),
-      _value = value {
+    this.dragStartBehavior = DragStartBehavior.start,
+  }) : assert(value != null),
+       assert(context != null),
+       _value = value {
     final OverlayState overlay = Overlay.of(context);
-    assert(overlay != null);
-    _handleController = AnimationController(duration: _fadeDuration, vsync: overlay);
-    _toolbarController = AnimationController(duration: _fadeDuration, vsync: overlay);
+    assert(overlay != null,
+      'No Overlay widget exists above $context.\n'
+      'Usually the Navigator created by WidgetsApp provides the overlay. Perhaps your '
+      'app content was created above the Navigator with the WidgetsApp builder parameter.');
+    _toolbarController = AnimationController(duration: fadeDuration, vsync: overlay);
   }
 
   /// The context in which the selection handles should appear.
@@ -263,11 +286,27 @@ class TextSelectionOverlay {
   /// text field.
   final TextSelectionDelegate selectionDelegate;
 
-  /// Controls the fade-in animations.
-  static const Duration _fadeDuration = Duration(milliseconds: 150);
-  AnimationController _handleController;
+  /// Determines the way that drag start behavior is handled.
+  ///
+  /// If set to [DragStartBehavior.start], handle drag behavior will
+  /// begin upon the detection of a drag gesture. If set to
+  /// [DragStartBehavior.down] it will begin when a down event is first detected.
+  ///
+  /// In general, setting this to [DragStartBehavior.start] will make drag
+  /// animation smoother and setting it to [DragStartBehavior.down] will make
+  /// drag behavior feel slightly more reactive.
+  ///
+  /// By default, the drag start behavior is [DragStartBehavior.start].
+  ///
+  /// See also:
+  ///
+  ///  * [DragGestureRecognizer.dragStartBehavior], which gives an example for the different behaviors.
+  final DragStartBehavior dragStartBehavior;
+
+  /// Controls the fade-in and fade-out animations for the toolbar and handles.
+  static const Duration fadeDuration = Duration(milliseconds: 150);
+
   AnimationController _toolbarController;
-  Animation<double> get _handleOpacity => _handleController.view;
   Animation<double> get _toolbarOpacity => _toolbarController.view;
 
   TextEditingValue _value;
@@ -289,7 +328,6 @@ class TextSelectionOverlay {
       OverlayEntry(builder: (BuildContext context) => _buildHandle(context, _TextSelectionHandlePosition.end)),
     ];
     Overlay.of(context, debugRequiredFor: debugRequiredFor).insertAll(_handles);
-    _handleController.forward(from: 0.0);
   }
 
   /// Shows the toolbar by inserting it into the [context]'s overlay.
@@ -328,7 +366,7 @@ class TextSelectionOverlay {
     _markNeedsBuild();
   }
 
-  void _markNeedsBuild([Duration duration]) {
+  void _markNeedsBuild([ Duration duration ]) {
     if (_handles != null) {
       _handles[0].markNeedsBuild();
       _handles[1].markNeedsBuild();
@@ -352,33 +390,28 @@ class TextSelectionOverlay {
     _toolbar?.remove();
     _toolbar = null;
 
-    _handleController.stop();
     _toolbarController.stop();
   }
 
   /// Final cleanup.
   void dispose() {
     hide();
-    _handleController.dispose();
     _toolbarController.dispose();
   }
 
   Widget _buildHandle(BuildContext context, _TextSelectionHandlePosition position) {
     if ((_selection.isCollapsed && position == _TextSelectionHandlePosition.end) ||
-        selectionControls == null)
+         selectionControls == null)
       return Container(); // hide the second handle when collapsed
-
-    return FadeTransition(
-      opacity: _handleOpacity,
-      child: _TextSelectionHandleOverlay(
-        onSelectionHandleChanged: (TextSelection newSelection) { _handleSelectionHandleChanged(newSelection, position); },
-        onSelectionHandleTapped: _handleSelectionHandleTapped,
-        layerLink: layerLink,
-        renderObject: renderObject,
-        selection: _selection,
-        selectionControls: selectionControls,
-        position: position,
-      )
+    return _TextSelectionHandleOverlay(
+      onSelectionHandleChanged: (TextSelection newSelection) { _handleSelectionHandleChanged(newSelection, position); },
+      onSelectionHandleTapped: _handleSelectionHandleTapped,
+      layerLink: layerLink,
+      renderObject: renderObject,
+      selection: _selection,
+      selectionControls: selectionControls,
+      position: position,
+      dragStartBehavior: dragStartBehavior,
     );
   }
 
@@ -447,7 +480,8 @@ class _TextSelectionHandleOverlay extends StatefulWidget {
     @required this.renderObject,
     @required this.onSelectionHandleChanged,
     @required this.onSelectionHandleTapped,
-    @required this.selectionControls
+    @required this.selectionControls,
+    this.dragStartBehavior = DragStartBehavior.start,
   }) : super(key: key);
 
   final TextSelection selection;
@@ -457,13 +491,61 @@ class _TextSelectionHandleOverlay extends StatefulWidget {
   final ValueChanged<TextSelection> onSelectionHandleChanged;
   final VoidCallback onSelectionHandleTapped;
   final TextSelectionControls selectionControls;
+  final DragStartBehavior dragStartBehavior;
 
   @override
   _TextSelectionHandleOverlayState createState() => _TextSelectionHandleOverlayState();
+
+  ValueListenable<bool> get _visibility {
+    switch (position) {
+      case _TextSelectionHandlePosition.start:
+        return renderObject.selectionStartInViewport;
+      case _TextSelectionHandlePosition.end:
+        return renderObject.selectionEndInViewport;
+    }
+    return null;
+  }
 }
 
-class _TextSelectionHandleOverlayState extends State<_TextSelectionHandleOverlay> {
+class _TextSelectionHandleOverlayState
+    extends State<_TextSelectionHandleOverlay> with SingleTickerProviderStateMixin {
   Offset _dragPosition;
+
+  AnimationController _controller;
+  Animation<double> get _opacity => _controller.view;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _controller = AnimationController(duration: TextSelectionOverlay.fadeDuration, vsync: this);
+
+    _handleVisibilityChanged();
+    widget._visibility.addListener(_handleVisibilityChanged);
+  }
+
+  void _handleVisibilityChanged() {
+    if (widget._visibility.value) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+  }
+
+  @override
+  void didUpdateWidget(_TextSelectionHandleOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    oldWidget._visibility.removeListener(_handleVisibilityChanged);
+    _handleVisibilityChanged();
+    widget._visibility.addListener(_handleVisibilityChanged);
+  }
+
+  @override
+  void dispose() {
+    widget._visibility.removeListener(_handleVisibilityChanged);
+    _controller.dispose();
+    super.dispose();
+  }
 
   void _handleDragStart(DragStartDetails details) {
     _dragPosition = details.globalPosition + Offset(0.0, -widget.selectionControls.handleSize.height);
@@ -483,13 +565,13 @@ class _TextSelectionHandleOverlayState extends State<_TextSelectionHandleOverlay
       case _TextSelectionHandlePosition.start:
         newSelection = TextSelection(
           baseOffset: position.offset,
-          extentOffset: widget.selection.extentOffset
+          extentOffset: widget.selection.extentOffset,
         );
         break;
       case _TextSelectionHandlePosition.end:
         newSelection = TextSelection(
           baseOffset: widget.selection.baseOffset,
-          extentOffset: position.offset
+          extentOffset: position.offset,
         );
         break;
     }
@@ -524,37 +606,48 @@ class _TextSelectionHandleOverlayState extends State<_TextSelectionHandleOverlay
         break;
     }
 
+    final Size viewport = widget.renderObject.size;
+    point = Offset(
+      point.dx.clamp(0.0, viewport.width),
+      point.dy.clamp(0.0, viewport.height),
+    );
+
+
     return CompositedTransformFollower(
       link: widget.layerLink,
       showWhenUnlinked: false,
-      child: GestureDetector(
-        onPanStart: _handleDragStart,
-        onPanUpdate: _handleDragUpdate,
-        onTap: _handleTap,
-        child: Stack(
-          // Always let the selection handles draw outside of the conceptual
-          // box where (0,0) is the top left corner of the RenderEditable.
-          overflow: Overflow.visible,
-          children: <Widget>[
-            Positioned(
-              left: point.dx,
-              top: point.dy,
-              child: widget.selectionControls.buildHandle(
-                context,
-                type,
-                widget.renderObject.preferredLineHeight,
+      child: FadeTransition(
+        opacity: _opacity,
+        child: GestureDetector(
+          dragStartBehavior: widget.dragStartBehavior,
+          onPanStart: _handleDragStart,
+          onPanUpdate: _handleDragUpdate,
+          onTap: _handleTap,
+          child: Stack(
+            // Always let the selection handles draw outside of the conceptual
+            // box where (0,0) is the top left corner of the RenderEditable.
+            overflow: Overflow.visible,
+            children: <Widget>[
+              Positioned(
+                left: point.dx,
+                top: point.dy,
+                child: widget.selectionControls.buildHandle(
+                  context,
+                  type,
+                  widget.renderObject.preferredLineHeight,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
+      )
     );
   }
 
   TextSelectionHandleType _chooseType(
     TextSelectionPoint endpoint,
     TextSelectionHandleType ltrType,
-    TextSelectionHandleType rtlType
+    TextSelectionHandleType rtlType,
   ) {
     if (widget.selection.isCollapsed)
       return TextSelectionHandleType.collapsed;
@@ -590,10 +683,17 @@ class TextSelectionGestureDetector extends StatefulWidget {
   const TextSelectionGestureDetector({
     Key key,
     this.onTapDown,
+    this.onForcePressStart,
+    this.onForcePressEnd,
     this.onSingleTapUp,
     this.onSingleTapCancel,
-    this.onSingleLongTapDown,
+    this.onSingleLongTapStart,
+    this.onSingleLongTapMoveUpdate,
+    this.onSingleLongTapEnd,
     this.onDoubleTapDown,
+    this.onDragSelectionStart,
+    this.onDragSelectionUpdate,
+    this.onDragSelectionEnd,
     this.behavior,
     @required this.child,
   }) : assert(child != null),
@@ -603,6 +703,14 @@ class TextSelectionGestureDetector extends StatefulWidget {
   /// double click or a long press, except touches that include enough movement
   /// to not qualify as taps (e.g. pans and flings).
   final GestureTapDownCallback onTapDown;
+
+  /// Called when a pointer has tapped down and the force of the pointer has
+  /// just become greater than [ForcePressGestureDetector.startPressure].
+  final GestureForcePressStartCallback onForcePressStart;
+
+  /// Called when a pointer that had previously triggered [onForcePressStart] is
+  /// lifted off the screen.
+  final GestureForcePressEndCallback onForcePressEnd;
 
   /// Called for each distinct tap except for every second tap of a double tap.
   /// For example, if the detector was configured [onSingleTapDown] and
@@ -618,11 +726,30 @@ class TextSelectionGestureDetector extends StatefulWidget {
   /// Called for a single long tap that's sustained for longer than
   /// [kLongPressTimeout] but not necessarily lifted. Not called for a
   /// double-tap-hold, which calls [onDoubleTapDown] instead.
-  final GestureLongPressCallback onSingleLongTapDown;
+  final GestureLongPressStartCallback onSingleLongTapStart;
+
+  /// Called after [onSingleLongTapStart] when the pointer is dragged.
+  final GestureLongPressMoveUpdateCallback onSingleLongTapMoveUpdate;
+
+  /// Called after [onSingleLongTapStart] when the pointer is lifted.
+  final GestureLongPressEndCallback onSingleLongTapEnd;
 
   /// Called after a momentary hold or a short tap that is close in space and
   /// time (within [kDoubleTapTimeout]) to a previous short tap.
   final GestureTapDownCallback onDoubleTapDown;
+
+  /// Called when a mouse starts dragging to select text.
+  final GestureDragStartCallback onDragSelectionStart;
+
+  /// Called repeatedly as a mouse moves while dragging.
+  ///
+  /// The frequency of calls is throttled to avoid excessive text layout
+  /// operations in text fields. The throttling is controlled by the constant
+  /// [_kDragSelectionUpdateThrottle].
+  final DragSelectionUpdateCallback onDragSelectionUpdate;
+
+  /// Called when a mouse that was previously dragging is released.
+  final GestureDragEndCallback onDragSelectionEnd;
 
   /// How this gesture detector should behave during hit testing.
   ///
@@ -647,6 +774,7 @@ class _TextSelectionGestureDetectorState extends State<TextSelectionGestureDetec
   @override
   void dispose() {
     _doubleTapTimer?.cancel();
+    _dragUpdateThrottleTimer?.cancel();
     super.dispose();
   }
 
@@ -690,9 +818,83 @@ class _TextSelectionGestureDetectorState extends State<TextSelectionGestureDetec
     }
   }
 
-  void _handleLongPress() {
-    if (!_isDoubleTap && widget.onSingleLongTapDown != null) {
-      widget.onSingleLongTapDown();
+  DragStartDetails _lastDragStartDetails;
+  DragUpdateDetails _lastDragUpdateDetails;
+  Timer _dragUpdateThrottleTimer;
+
+  void _handleDragStart(DragStartDetails details) {
+    assert(_lastDragStartDetails == null);
+    _lastDragStartDetails = details;
+    if (widget.onDragSelectionStart != null) {
+      widget.onDragSelectionStart(details);
+    }
+  }
+
+  void _handleDragUpdate(DragUpdateDetails details) {
+    _lastDragUpdateDetails = details;
+    // Only schedule a new timer if there's no one pending.
+    _dragUpdateThrottleTimer ??= Timer(_kDragSelectionUpdateThrottle, _handleDragUpdateThrottled);
+  }
+
+  /// Drag updates are being throttled to avoid excessive text layouts in text
+  /// fields. The frequency of invocations is controlled by the constant
+  /// [_kDragSelectionUpdateThrottle].
+  ///
+  /// Once the drag gesture ends, any pending drag update will be fired
+  /// immediately. See [_handleDragEnd].
+  void _handleDragUpdateThrottled() {
+    assert(_lastDragStartDetails != null);
+    assert(_lastDragUpdateDetails != null);
+    if (widget.onDragSelectionUpdate != null) {
+      widget.onDragSelectionUpdate(_lastDragStartDetails, _lastDragUpdateDetails);
+    }
+    _dragUpdateThrottleTimer = null;
+    _lastDragUpdateDetails = null;
+  }
+
+  void _handleDragEnd(DragEndDetails details) {
+    assert(_lastDragStartDetails != null);
+    if (_dragUpdateThrottleTimer != null) {
+      // If there's already an update scheduled, trigger it immediately and
+      // cancel the timer.
+      _dragUpdateThrottleTimer.cancel();
+      _handleDragUpdateThrottled();
+    }
+    if (widget.onDragSelectionEnd != null) {
+      widget.onDragSelectionEnd(details);
+    }
+    _dragUpdateThrottleTimer = null;
+    _lastDragStartDetails = null;
+    _lastDragUpdateDetails = null;
+  }
+
+  void _forcePressStarted(ForcePressDetails details) {
+    _doubleTapTimer?.cancel();
+    _doubleTapTimer = null;
+    if (widget.onForcePressStart != null)
+      widget.onForcePressStart(details);
+  }
+
+  void _forcePressEnded(ForcePressDetails details) {
+    if (widget.onForcePressEnd != null)
+      widget.onForcePressEnd(details);
+  }
+
+  void _handleLongPressStart(LongPressStartDetails details) {
+    if (!_isDoubleTap && widget.onSingleLongTapStart != null) {
+      widget.onSingleLongTapStart(details);
+    }
+  }
+
+  void _handleLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    if (!_isDoubleTap && widget.onSingleLongTapMoveUpdate != null) {
+      widget.onSingleLongTapMoveUpdate(details);
+    }
+  }
+
+  void _handleLongPressEnd(LongPressEndDetails details) {
+    if (!_isDoubleTap && widget.onSingleLongTapEnd != null) {
+      widget.onSingleLongTapEnd(details);
     }
     _isDoubleTap = false;
   }
@@ -714,11 +916,64 @@ class _TextSelectionGestureDetectorState extends State<TextSelectionGestureDetec
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: _handleTapDown,
-      onTapUp: _handleTapUp,
-      onTapCancel: _handleTapCancel,
-      onLongPress: _handleLongPress,
+    final Map<Type, GestureRecognizerFactory> gestures = <Type, GestureRecognizerFactory>{};
+
+    gestures[TapGestureRecognizer] = GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+      () => TapGestureRecognizer(debugOwner: this),
+      (TapGestureRecognizer instance) {
+        instance
+          ..onTapDown = _handleTapDown
+          ..onTapUp = _handleTapUp
+          ..onTapCancel = _handleTapCancel;
+      },
+    );
+
+    if (widget.onSingleLongTapStart != null ||
+        widget.onSingleLongTapMoveUpdate != null ||
+        widget.onSingleLongTapEnd != null) {
+      gestures[LongPressGestureRecognizer] = GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+        () => LongPressGestureRecognizer(debugOwner: this, kind: PointerDeviceKind.touch),
+        (LongPressGestureRecognizer instance) {
+          instance
+            ..onLongPressStart = _handleLongPressStart
+            ..onLongPressMoveUpdate = _handleLongPressMoveUpdate
+            ..onLongPressEnd = _handleLongPressEnd;
+        },
+      );
+    }
+
+    if (widget.onDragSelectionStart != null ||
+        widget.onDragSelectionUpdate != null ||
+        widget.onDragSelectionEnd != null) {
+      // TODO(mdebbar): Support dragging in any direction (for multiline text).
+      // https://github.com/flutter/flutter/issues/28676
+      gestures[HorizontalDragGestureRecognizer] = GestureRecognizerFactoryWithHandlers<HorizontalDragGestureRecognizer>(
+        () => HorizontalDragGestureRecognizer(debugOwner: this, kind: PointerDeviceKind.mouse),
+        (HorizontalDragGestureRecognizer instance) {
+          instance
+            // Text selection should start from the position of the first pointer
+            // down event.
+            ..dragStartBehavior = DragStartBehavior.down
+            ..onStart = _handleDragStart
+            ..onUpdate = _handleDragUpdate
+            ..onEnd = _handleDragEnd;
+        },
+      );
+    }
+
+    if (widget.onForcePressStart != null || widget.onForcePressEnd != null) {
+      gestures[ForcePressGestureRecognizer] = GestureRecognizerFactoryWithHandlers<ForcePressGestureRecognizer>(
+        () => ForcePressGestureRecognizer(debugOwner: this),
+        (ForcePressGestureRecognizer instance) {
+          instance
+            ..onStart = widget.onForcePressStart != null ? _forcePressStarted : null
+            ..onEnd = widget.onForcePressEnd != null ? _forcePressEnded : null;
+        },
+      );
+    }
+
+    return RawGestureDetector(
+      gestures: gestures,
       excludeFromSemantics: true,
       behavior: widget.behavior,
       child: widget.child,

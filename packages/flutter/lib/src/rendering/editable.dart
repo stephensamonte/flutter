@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//ignore: Remove this once Google catches up with dev.4 Dart.
-import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui show TextBox, lerpDouble;
 
@@ -21,7 +19,7 @@ const double _kCaretHeightOffset = 2.0; // pixels
 
 // The additional size on the x and y axis with which to expand the prototype
 // cursor to render the floating cursor in pixels.
-const Offset _kFloatingCaretSizeIncrease = Offset(0.5, 2.0);
+const Offset _kFloatingCaretSizeIncrease = Offset(0.5, 1.0);
 
 // The corner radius of the floating cursor in pixels.
 const double _kFloatingCaretRadius = 1.0;
@@ -47,12 +45,20 @@ enum SelectionChangedCause {
   /// location of the cursor) to change.
   longPress,
 
+  /// The user force-pressed the text and that caused the selection (or the
+  /// location of the cursor) to change.
+  forcePress,
+
   /// The user used the keyboard to change the selection or the location of the
   /// cursor.
   ///
   /// Keyboard-triggered selection changes may be caused by the IME as well as
   /// by accessibility tools (e.g. TalkBack on Android).
   keyboard,
+
+  /// The user used the mouse to change the selection by dragging over a piece
+  /// of text.
+  drag,
 }
 
 /// Signature for the callback that reports when the caret location changes.
@@ -69,7 +75,7 @@ class TextSelectionPoint {
   ///
   /// The [point] argument must not be null.
   const TextSelectionPoint(this.point, this.direction)
-      : assert(point != null);
+    : assert(point != null);
 
   /// Coordinates of the lower left or lower right corner of the selection,
   /// relative to the top left of the [RenderEditable] object.
@@ -138,6 +144,9 @@ class RenderEditable extends RenderBox {
     ValueNotifier<bool> showCursor,
     bool hasFocus,
     int maxLines = 1,
+    int minLines,
+    bool expands = false,
+    StrutStyle strutStyle,
     Color selectionColor,
     double textScaleFactor = 1.0,
     TextSelection selection,
@@ -149,37 +158,58 @@ class RenderEditable extends RenderBox {
     Locale locale,
     double cursorWidth = 1.0,
     Radius cursorRadius,
+    bool paintCursorAboveText = false,
+    Offset cursorOffset,
+    double devicePixelRatio = 1.0,
     bool enableInteractiveSelection,
-    EdgeInsets floatingCursorAddedMargin = const EdgeInsets.fromLTRB(3, 6, 3, 6),
+    EdgeInsets floatingCursorAddedMargin = const EdgeInsets.fromLTRB(4, 4, 4, 5),
     @required this.textSelectionDelegate,
   }) : assert(textAlign != null),
        assert(textDirection != null, 'RenderEditable created without a textDirection.'),
        assert(maxLines == null || maxLines > 0),
+       assert(minLines == null || minLines > 0),
+       assert(
+         (maxLines == null) || (minLines == null) || (maxLines >= minLines),
+         'minLines can\'t be greater than maxLines',
+       ),
+       assert(expands != null),
+       assert(
+         !expands || (maxLines == null && minLines == null),
+         'minLines and maxLines must be null when expands is true.',
+       ),
        assert(textScaleFactor != null),
        assert(offset != null),
        assert(ignorePointer != null),
+       assert(paintCursorAboveText != null),
        assert(obscureText != null),
        assert(textSelectionDelegate != null),
        assert(cursorWidth != null && cursorWidth >= 0.0),
+        assert(devicePixelRatio != null),
        _textPainter = TextPainter(
          text: text,
          textAlign: textAlign,
          textDirection: textDirection,
          textScaleFactor: textScaleFactor,
          locale: locale,
+         strutStyle: strutStyle,
        ),
        _cursorColor = cursorColor,
        _backgroundCursorColor = backgroundCursorColor,
        _showCursor = showCursor ?? ValueNotifier<bool>(false),
        _hasFocus = hasFocus ?? false,
        _maxLines = maxLines,
+       _minLines = minLines,
+       _expands = expands,
        _selectionColor = selectionColor,
        _selection = selection,
        _offset = offset,
        _cursorWidth = cursorWidth,
        _cursorRadius = cursorRadius,
+       _paintCursorOnTop = paintCursorAboveText,
+       _cursorOffset = cursorOffset,
        _floatingCursorAddedMargin = floatingCursorAddedMargin,
        _enableInteractiveSelection = enableInteractiveSelection,
+       _devicePixelRatio = devicePixelRatio,
        _obscureText = obscureText {
     assert(_showCursor != null);
     assert(!_showCursor.value || cursorColor != null);
@@ -208,6 +238,18 @@ class RenderEditable extends RenderBox {
   /// The default value of this property is false.
   bool ignorePointer;
 
+  /// The pixel ratio of the current device.
+  ///
+  /// Should be obtained by querying MediaQuery for the devicePixelRatio.
+  double get devicePixelRatio => _devicePixelRatio;
+  double _devicePixelRatio;
+  set devicePixelRatio(double value) {
+    if (devicePixelRatio == value)
+      return;
+    _devicePixelRatio = value;
+    markNeedsTextLayout();
+  }
+
   /// Whether to hide the text being edited (e.g., for passwords).
   bool get obscureText => _obscureText;
   bool _obscureText;
@@ -226,6 +268,50 @@ class RenderEditable extends RenderBox {
   TextSelectionDelegate textSelectionDelegate;
 
   Rect _lastCaretRect;
+
+  /// Track whether position of the start of the selected text is within the viewport.
+  ///
+  /// For example, if the text contains "Hello World", and the user selects
+  /// "Hello", then scrolls so only "World" is visible, this will become false.
+  /// If the user scrolls back so that the "H" is visible again, this will
+  /// become true.
+  ///
+  /// This bool indicates whether the text is scrolled so that the handle is
+  /// inside the text field viewport, as opposed to whether it is actually
+  /// visible on the screen.
+  ValueListenable<bool> get selectionStartInViewport => _selectionStartInViewport;
+  final ValueNotifier<bool> _selectionStartInViewport = ValueNotifier<bool>(true);
+
+  /// Track whether position of the end of the selected text is within the viewport.
+  ///
+  /// For example, if the text contains "Hello World", and the user selects
+  /// "World", then scrolls so only "Hello" is visible, this will become
+  /// 'false'. If the user scrolls back so that the "d" is visible again, this
+  /// will become 'true'.
+  ///
+  /// This bool indicates whether the text is scrolled so that the handle is
+  /// inside the text field viewport, as opposed to whether it is actually
+  /// visible on the screen.
+  ValueListenable<bool> get selectionEndInViewport => _selectionEndInViewport;
+  final ValueNotifier<bool> _selectionEndInViewport = ValueNotifier<bool>(true);
+
+  void _updateSelectionExtentsVisibility(Offset effectiveOffset) {
+    final Rect visibleRegion = Offset.zero & size;
+
+    final Offset startOffset = _textPainter.getOffsetForCaret(
+      TextPosition(offset: _selection.start, affinity: _selection.affinity),
+      Rect.zero
+    );
+
+    _selectionStartInViewport.value = visibleRegion.contains(startOffset + effectiveOffset);
+
+    final Offset endOffset =  _textPainter.getOffsetForCaret(
+      TextPosition(offset: _selection.end, affinity: _selection.affinity),
+      Rect.zero
+    );
+
+    _selectionEndInViewport.value = visibleRegion.contains(endOffset + effectiveOffset);
+  }
 
   static const int _kLeftArrowCode = 21;
   static const int _kRightArrowCode = 22;
@@ -256,8 +342,14 @@ class RenderEditable extends RenderBox {
 
   // TODO(goderbauer): doesn't handle extended grapheme clusters with more than one Unicode scalar value (https://github.com/flutter/flutter/issues/13404).
   void _handleKeyEvent(RawKeyEvent keyEvent) {
-    if (defaultTargetPlatform != TargetPlatform.android)
-      return;
+    // Only handle key events on Android.
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        break;
+      case TargetPlatform.iOS:
+      case TargetPlatform.fuchsia:
+        return;
+    }
 
     if (keyEvent is RawKeyUpEvent)
       return;
@@ -385,7 +477,7 @@ class RenderEditable extends RenderBox {
         onSelectionChanged(
           TextSelection(
             baseOffset: _baseOffset,
-            extentOffset: newOffset
+            extentOffset: newOffset,
           ),
           this,
           SelectionChangedCause.keyboard,
@@ -394,7 +486,7 @@ class RenderEditable extends RenderBox {
         onSelectionChanged(
           TextSelection(
             baseOffset: newOffset,
-            extentOffset: _baseOffset
+            extentOffset: _baseOffset,
           ),
           this,
           SelectionChangedCause.keyboard,
@@ -481,12 +573,12 @@ class RenderEditable extends RenderBox {
       textSelectionDelegate.textEditingValue = TextEditingValue(
         text: selection.textBefore(text.text)
           + selection.textAfter(text.text).substring(1),
-        selection: TextSelection.collapsed(offset: selection.start)
+        selection: TextSelection.collapsed(offset: selection.start),
       );
     } else {
       textSelectionDelegate.textEditingValue = TextEditingValue(
         text: selection.textBefore(text.text),
-        selection: TextSelection.collapsed(offset: selection.start)
+        selection: TextSelection.collapsed(offset: selection.start),
       );
     }
   }
@@ -562,6 +654,16 @@ class RenderEditable extends RenderBox {
     if (_textPainter.locale == value)
       return;
     _textPainter.locale = value;
+    markNeedsTextLayout();
+  }
+
+  /// The [StrutStyle] used by the renderer's internal [TextPainter] to
+  /// determine the strut to use.
+  StrutStyle get strutStyle => _textPainter.strutStyle;
+  set strutStyle(StrutStyle value) {
+    if (_textPainter.strutStyle == value)
+      return;
+    _textPainter.strutStyle = value;
     markNeedsTextLayout();
   }
 
@@ -647,6 +749,29 @@ class RenderEditable extends RenderBox {
     markNeedsTextLayout();
   }
 
+  /// {@macro flutter.widgets.editableText.minLines}
+  int get minLines => _minLines;
+  int _minLines;
+  /// The value may be null. If it is not null, then it must be greater than zero.
+  set minLines(int value) {
+    assert(value == null || value > 0);
+    if (minLines == value)
+      return;
+    _minLines = value;
+    markNeedsTextLayout();
+  }
+
+  /// {@macro flutter.widgets.editableText.expands}
+  bool get expands => _expands;
+  bool _expands;
+  set expands(bool value) {
+    assert(value != null);
+    if (expands == value)
+      return;
+    _expands = value;
+    markNeedsTextLayout();
+  }
+
   /// The color to use when painting the selection.
   Color get selectionColor => _selectionColor;
   Color _selectionColor;
@@ -713,6 +838,38 @@ class RenderEditable extends RenderBox {
     markNeedsLayout();
   }
 
+  /// {@template flutter.rendering.editable.paintCursorOnTop}
+  /// If the cursor should be painted on top of the text or underneath it.
+  ///
+  /// By default, the cursor should be painted on top for iOS platforms and
+  /// underneath for Android platforms.
+  /// {@endtemplate}
+  bool get paintCursorAboveText => _paintCursorOnTop;
+  bool _paintCursorOnTop;
+  set paintCursorAboveText(bool value) {
+    if (_paintCursorOnTop == value)
+      return;
+    _paintCursorOnTop = value;
+    markNeedsLayout();
+  }
+
+  /// {@template flutter.rendering.editable.cursorOffset}
+  /// The offset that is used, in pixels, when painting the cursor on screen.
+  ///
+  /// By default, the cursor position should be set to an offset of
+  /// (-[cursorWidth] * 0.5, 0.0) on iOS platforms and (0, 0) on Android
+  /// platforms. The origin from where the offset is applied to is the arbitrary
+  /// location where the cursor ends up being rendered from by default.
+  /// {@endtemplate}
+  Offset get cursorOffset => _cursorOffset;
+  Offset _cursorOffset;
+  set cursorOffset(Offset value) {
+    if (_cursorOffset == value)
+      return;
+    _cursorOffset = value;
+    markNeedsLayout();
+  }
+
   /// How rounded the corners of the cursor should be.
   Radius get cursorRadius => _cursorRadius;
   Radius _cursorRadius;
@@ -726,7 +883,7 @@ class RenderEditable extends RenderBox {
   /// The padding applied to text field. Used to determine the bounds when
   /// moving the floating cursor.
   ///
-  /// Defaults to a padding with left, right set to 3 and top, bottom to 6.
+  /// Defaults to a padding with left, top and right set to 4, bottom to 5.
   EdgeInsets get floatingCursorAddedMargin => _floatingCursorAddedMargin;
   EdgeInsets _floatingCursorAddedMargin;
   set floatingCursorAddedMargin(EdgeInsets value) {
@@ -1049,7 +1206,12 @@ class RenderEditable extends RenderBox {
     _layoutText(constraints.maxWidth);
     final Offset caretOffset = _textPainter.getOffsetForCaret(caretPosition, _caretPrototype);
     // This rect is the same as _caretPrototype but without the vertical padding.
-    return Rect.fromLTWH(0.0, 0.0, cursorWidth, preferredLineHeight).shift(caretOffset + _paintOffset);
+    Rect rect = Rect.fromLTWH(0.0, 0.0, cursorWidth, preferredLineHeight).shift(caretOffset + _paintOffset);
+    // Add additional cursor offset (generally only if on iOS).
+    if (_cursorOffset != null)
+      rect = rect.shift(_cursorOffset);
+
+    return rect.shift(_getPixelPerfectCursorOffset(rect));
   }
 
   @override
@@ -1069,8 +1231,28 @@ class RenderEditable extends RenderBox {
   double get preferredLineHeight => _textPainter.preferredLineHeight;
 
   double _preferredHeight(double width) {
-    if (maxLines != null)
+    // Lock height to maxLines if needed
+    final bool lockedMax = maxLines != null && minLines == null;
+    final bool lockedBoth = minLines != null && minLines == maxLines;
+    final bool singleLine = maxLines == 1;
+    if (singleLine || lockedMax || lockedBoth) {
       return preferredLineHeight * maxLines;
+    }
+
+    // Clamp height to minLines or maxLines if needed
+    final bool minLimited = minLines != null && minLines > 1;
+    final bool maxLimited = maxLines != null;
+    if (minLimited || maxLimited) {
+      _layoutText(width);
+      if (minLimited && _textPainter.height < preferredLineHeight * minLines) {
+        return preferredLineHeight * minLines;
+      }
+      if (maxLimited && _textPainter.height > preferredLineHeight * maxLines) {
+        return preferredLineHeight * maxLines;
+      }
+    }
+
+    // Set the height based on the content
     if (width == double.infinity) {
       final String text = _textPainter.text.toPlainText();
       int lines = 1;
@@ -1126,7 +1308,7 @@ class RenderEditable extends RenderBox {
   /// When [ignorePointer] is true, an ancestor widget must respond to tap
   /// down events by calling this method.
   void handleTapDown(TapDownDetails details) {
-    _lastTapDownPosition = details.globalPosition + -_paintOffset;
+    _lastTapDownPosition = details.globalPosition;
   }
   void _handleTapDown(TapDownDetails details) {
     assert(!ignorePointer);
@@ -1158,7 +1340,7 @@ class RenderEditable extends RenderBox {
   }
 
   /// If [ignorePointer] is false (the default) then this method is called by
-  /// the internal gesture recognizer's [LongPressRecognizer.onLongPress]
+  /// the internal gesture recognizer's [LongPressGestureRecognizer.onLongPress]
   /// callback.
   ///
   /// When [ignorePointer] is true, an ancestor widget must respond to long
@@ -1172,34 +1354,83 @@ class RenderEditable extends RenderBox {
   }
 
   /// Move selection to the location of the last tap down.
-  void selectPosition({@required SelectionChangedCause cause}) {
+  ///
+  /// {@template flutter.rendering.editable.select}
+  /// This method is mainly used to translate user inputs in global positions
+  /// into a [TextSelection]. When used in conjunction with a [EditableText],
+  /// the selection change is fed back into [TextEditingController.selection].
+  ///
+  /// If you have a [TextEditingController], it's generally easier to
+  /// programmatically manipulate its `value` or `selection` directly.
+  /// {@endtemplate}
+  void selectPosition({ @required SelectionChangedCause cause }) {
+    selectPositionAt(from: _lastTapDownPosition, cause: cause);
+  }
+
+  /// Select text between the global positions [from] and [to].
+  void selectPositionAt({ @required Offset from, Offset to, @required SelectionChangedCause cause }) {
     assert(cause != null);
+    assert(from != null);
     _layoutText(constraints.maxWidth);
-    assert(_lastTapDownPosition != null);
     if (onSelectionChanged != null) {
-      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition));
-      onSelectionChanged(TextSelection.fromPosition(position), this, cause);
+      final TextPosition fromPosition = _textPainter.getPositionForOffset(globalToLocal(from - _paintOffset));
+      final TextPosition toPosition = to == null
+        ? null
+        : _textPainter.getPositionForOffset(globalToLocal(to - _paintOffset));
+      onSelectionChanged(
+        TextSelection(
+          baseOffset: fromPosition.offset,
+          extentOffset: toPosition?.offset ?? fromPosition.offset,
+          affinity: fromPosition.affinity,
+        ),
+        this,
+        cause,
+      );
     }
   }
 
   /// Select a word around the location of the last tap down.
-  void selectWord({@required SelectionChangedCause cause}) {
+  ///
+  /// {@macro flutter.rendering.editable.select}
+  void selectWord({ @required SelectionChangedCause cause }) {
+    selectWordsInRange(from: _lastTapDownPosition, cause: cause);
+  }
+
+  /// Selects the set words of a paragraph in a given range of global positions.
+  ///
+  /// The first and last endpoints of the selection will always be at the
+  /// beginning and end of a word respectively.
+  ///
+  /// {@macro flutter.rendering.editable.select}
+  void selectWordsInRange({ @required Offset from, Offset to, @required SelectionChangedCause cause }) {
     assert(cause != null);
+    assert(from != null);
     _layoutText(constraints.maxWidth);
-    assert(_lastTapDownPosition != null);
     if (onSelectionChanged != null) {
-      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition));
-      onSelectionChanged(_selectWordAtOffset(position), this, cause);
+      final TextPosition firstPosition = _textPainter.getPositionForOffset(globalToLocal(from - _paintOffset));
+      final TextSelection firstWord = _selectWordAtOffset(firstPosition);
+      final TextSelection lastWord = to == null ?
+        firstWord : _selectWordAtOffset(_textPainter.getPositionForOffset(globalToLocal(to - _paintOffset)));
+
+      onSelectionChanged(
+        TextSelection(
+          baseOffset: firstWord.base.offset,
+          extentOffset: lastWord.extent.offset,
+          affinity: firstWord.affinity,
+        ), this, cause,
+      );
     }
   }
 
   /// Move the selection to the beginning or end of a word.
-  void selectWordEdge({@required SelectionChangedCause cause}) {
+  ///
+  /// {@macro flutter.rendering.editable.select}
+  void selectWordEdge({ @required SelectionChangedCause cause }) {
     assert(cause != null);
     _layoutText(constraints.maxWidth);
     assert(_lastTapDownPosition != null);
     if (onSelectionChanged != null) {
-      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition));
+      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition - _paintOffset));
       final TextRange word = _textPainter.getWordBoundary(position);
       if (position.offset - word.start <= 1) {
         onSelectionChanged(
@@ -1239,10 +1470,21 @@ class RenderEditable extends RenderBox {
     _textLayoutLastWidth = constraintWidth;
   }
 
+  /// On iOS, the cursor is taller than the the cursor on Android. The height
+  /// of the cursor for iOS is approximate and obtained through an eyeball
+  /// comparison.
+  Rect get _getCaretPrototype {
+    switch(defaultTargetPlatform){
+      case TargetPlatform.iOS:
+        return Rect.fromLTWH(0.0, -_kCaretHeightOffset + .5, cursorWidth, preferredLineHeight + 2);
+      default:
+        return Rect.fromLTWH(0.0, _kCaretHeightOffset, cursorWidth, preferredLineHeight - 2.0 * _kCaretHeightOffset);
+    }
+  }
   @override
   void performLayout() {
     _layoutText(constraints.maxWidth);
-    _caretPrototype = Rect.fromLTWH(0.0, _kCaretHeightOffset, cursorWidth, preferredLineHeight - 2.0 * _kCaretHeightOffset);
+    _caretPrototype = _getCaretPrototype;
     _selectionRects = null;
     // We grab _textPainter.size here because assigning to `size` on the next
     // line will trigger us to validate our intrinsic sizes, which will change
@@ -1260,15 +1502,30 @@ class RenderEditable extends RenderBox {
     offset.applyContentDimensions(0.0, _maxScrollExtent);
   }
 
+  Offset _getPixelPerfectCursorOffset(Rect caretRect) {
+    final Offset caretPosition = localToGlobal(caretRect.topLeft);
+    final double pixelMultiple = 1.0 / _devicePixelRatio;
+    final int quotientX = (caretPosition.dx / pixelMultiple).round();
+    final int quotientY = (caretPosition.dy / pixelMultiple).round();
+    final double pixelPerfectOffsetX = quotientX * pixelMultiple - caretPosition.dx;
+    final double pixelPerfectOffsetY = quotientY * pixelMultiple - caretPosition.dy;
+    return Offset(pixelPerfectOffsetX, pixelPerfectOffsetY);
+  }
+
   void _paintCaret(Canvas canvas, Offset effectiveOffset, TextPosition textPosition) {
     assert(_textLayoutLastWidth == constraints.maxWidth);
     final Offset caretOffset = _textPainter.getOffsetForCaret(textPosition, _caretPrototype);
+
     // If the floating cursor is enabled, the text cursor's color is [backgroundCursorColor] while
     // the floating cursor's color is _cursorColor;
     final Paint paint = Paint()
       ..color = _floatingCursorOn ? backgroundCursorColor : _cursorColor;
 
-    final Rect caretRect = _caretPrototype.shift(caretOffset + effectiveOffset);
+    Rect caretRect = _caretPrototype.shift(caretOffset + effectiveOffset);
+    if (_cursorOffset != null)
+      caretRect = caretRect.shift(_cursorOffset);
+
+    caretRect = caretRect.shift(_getPixelPerfectCursorOffset(caretRect));
 
     if (cursorRadius == null) {
       canvas.drawRect(caretRect, paint);
@@ -1311,7 +1568,8 @@ class RenderEditable extends RenderBox {
     assert(_textLayoutLastWidth == constraints.maxWidth);
     assert(_floatingCursorOn);
 
-    final Paint paint = Paint()..color = _cursorColor;
+    // We always want the floating cursor to render at full opacity.
+    final Paint paint = Paint()..color = _cursorColor.withOpacity(0.75);
 
     double sizeAdjustmentX = _kFloatingCaretSizeIncrease.dx;
     double sizeAdjustmentY = _kFloatingCaretSizeIncrease.dy;
@@ -1321,10 +1579,13 @@ class RenderEditable extends RenderBox {
       sizeAdjustmentY = ui.lerpDouble(sizeAdjustmentY, 0, _resetFloatingCursorAnimationValue);
     }
 
-    final Rect floatingCaretPrototype = Rect.fromLTRB(_caretPrototype.left - sizeAdjustmentX,
-                                              _caretPrototype.top - sizeAdjustmentY,
-                                              _caretPrototype.right + sizeAdjustmentX,
-                                              _caretPrototype.bottom + sizeAdjustmentY);
+    final Rect floatingCaretPrototype = Rect.fromLTRB(
+      _caretPrototype.left - sizeAdjustmentX,
+      _caretPrototype.top - sizeAdjustmentY,
+      _caretPrototype.right + sizeAdjustmentX,
+      _caretPrototype.bottom + sizeAdjustmentY,
+    );
+
     final Rect caretRect = floatingCaretPrototype.shift(effectiveOffset);
     const Radius floatingCursorRadius = Radius.circular(_kFloatingCaretRadius);
     final RRect caretRRect = RRect.fromRectAndRadius(caretRect, floatingCursorRadius);
@@ -1401,15 +1662,34 @@ class RenderEditable extends RenderBox {
   void _paintContents(PaintingContext context, Offset offset) {
     assert(_textLayoutLastWidth == constraints.maxWidth);
     final Offset effectiveOffset = offset + _paintOffset;
+
+    bool showSelection = false;
+    bool showCaret = false;
+
     if (_selection != null && !_floatingCursorOn) {
-      if (_selection.isCollapsed && _showCursor.value && cursorColor != null) {
-        _paintCaret(context.canvas, effectiveOffset, _selection.extent);
-      } else if (!_selection.isCollapsed && _selectionColor != null) {
-        _selectionRects ??= _textPainter.getBoxesForSelection(_selection);
-        _paintSelection(context.canvas, effectiveOffset);
-      }
+      if (_selection.isCollapsed && _showCursor.value && cursorColor != null)
+        showCaret = true;
+      else if (!_selection.isCollapsed && _selectionColor != null)
+        showSelection = true;
+      _updateSelectionExtentsVisibility(effectiveOffset);
     }
-    _textPainter.paint(context.canvas, effectiveOffset);
+
+    if (showSelection) {
+      _selectionRects ??= _textPainter.getBoxesForSelection(_selection);
+      _paintSelection(context.canvas, effectiveOffset);
+    }
+
+    // On iOS, the cursor is painted over the text, on Android, it's painted
+    // under it.
+    if (paintCursorAboveText)
+      _textPainter.paint(context.canvas, effectiveOffset);
+
+    if (showCaret)
+      _paintCaret(context.canvas, effectiveOffset, _selection.extent);
+
+    if (!paintCursorAboveText)
+      _textPainter.paint(context.canvas, effectiveOffset);
+
     if (_floatingCursorOn) {
       if (_resetFloatingCursorAnimationValue == null)
         _paintCaret(context.canvas, effectiveOffset, _floatingCursorTextPosition);
@@ -1435,6 +1715,8 @@ class RenderEditable extends RenderBox {
     properties.add(DiagnosticsProperty<Color>('cursorColor', cursorColor));
     properties.add(DiagnosticsProperty<ValueNotifier<bool>>('showCursor', showCursor));
     properties.add(IntProperty('maxLines', maxLines));
+    properties.add(IntProperty('minLines', minLines));
+    properties.add(DiagnosticsProperty<bool>('expands', expands, defaultValue: false));
     properties.add(DiagnosticsProperty<Color>('selectionColor', selectionColor));
     properties.add(DoubleProperty('textScaleFactor', textScaleFactor));
     properties.add(DiagnosticsProperty<Locale>('locale', locale, defaultValue: null));
