@@ -20,7 +20,7 @@ import '../runner/flutter_command.dart';
 import '../tracing.dart';
 import 'daemon.dart';
 
-abstract class RunCommandBase extends FlutterCommand {
+abstract class RunCommandBase extends FlutterCommand with DeviceBasedDevelopmentArtifacts {
   // Used by run and drive commands.
   RunCommandBase({ bool verboseHelp = false }) {
     addBuildModeFlags(defaultToRelease: false, verboseHelp: verboseHelp);
@@ -34,7 +34,7 @@ abstract class RunCommandBase extends FlutterCommand {
       )
       ..addFlag('verbose-system-logs',
         negatable: false,
-        help: 'Include verbose logging from the flutter engine.'
+        help: 'Include verbose logging from the flutter engine.',
       )
       ..addOption('route',
         help: 'Which route to load when running the app.',
@@ -64,6 +64,7 @@ abstract class RunCommandBase extends FlutterCommand {
   }
 
   bool get traceStartup => argResults['trace-startup'];
+
   String get route => argResults['route'];
 }
 
@@ -98,6 +99,13 @@ class RunCommand extends RunCommandBase {
         negatable: false,
         help: 'Enable tracing to the system tracer. This is only useful on '
               'platforms where such a tracer is available (Android and Fuchsia).',
+      )
+      ..addFlag('dump-skp-on-shader-compilation',
+        negatable: false,
+        help: 'Automatically dump the skp that triggers new shader compilations. '
+              'This is useful for wrting custom ShaderWarmUp to reduce jank. '
+              'By default, this is not enabled to reduce the overhead. '
+              'This is only available in profile or debug build. ',
       )
       ..addFlag('await-first-frame-when-tracing',
         defaultsTo: true,
@@ -196,7 +204,7 @@ class RunCommand extends RunCommandBase {
             ? getNameForTargetPlatform(await devices[0].targetPlatform)
             : 'multiple';
 
-    return <String, String>{ 'cd3': '$isEmulator', 'cd4': deviceType };
+    return <String, String>{'cd3': '$isEmulator', 'cd4': deviceType};
   }
 
   @override
@@ -208,7 +216,7 @@ class RunCommand extends RunCommandBase {
       printStatus("Run 'flutter emulators' to list and start any available device emulators.");
       printStatus('');
       printStatus('If you expected your device to be detected, please run "flutter doctor" to diagnose');
-      printStatus('potential issues, or visit https://flutter.io/setup/ for troubleshooting tips.');
+      printStatus('potential issues, or visit https://flutter.dev/setup/ for troubleshooting tips.');
     }
   }
 
@@ -259,6 +267,7 @@ class RunCommand extends RunCommandBase {
         skiaDeterministicRendering: argResults['skia-deterministic-rendering'],
         traceSkia: argResults['trace-skia'],
         traceSystrace: argResults['trace-systrace'],
+        dumpSkpOnShaderCompilation: argResults['dump-skp-on-shader-compilation'],
         observatoryPort: observatoryPort,
         verboseSystemLogs: argResults['verbose-system-logs'],
       );

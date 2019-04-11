@@ -1309,18 +1309,20 @@ class _RendersOnPhysicalModel extends _MatchRenderObject<RenderPhysicalShape, Re
       return false;
 
     if (
-      borderRadius == null
-      && shape == BoxShape.rectangle
-      && !assertRoundedRectangle(shapeClipper, BorderRadius.zero, matchState)
-    )
+      borderRadius == null &&
+      shape == BoxShape.rectangle &&
+      !assertRoundedRectangle(shapeClipper, BorderRadius.zero, matchState)
+    ) {
       return false;
+    }
 
     if (
-      borderRadius == null
-      && shape == BoxShape.circle
-      && !assertCircle(shapeClipper, matchState)
-    )
+      borderRadius == null &&
+      shape == BoxShape.circle &&
+      !assertCircle(shapeClipper, matchState)
+    ) {
       return false;
+    }
 
     if (elevation != null && renderObject.elevation != elevation)
       return failWithDescription(matchState, 'had elevation: ${renderObject.elevation}');
@@ -1811,7 +1813,7 @@ class _MatchesSemanticsData extends Matcher {
       final List<CustomSemanticsAction> providedCustomActions = data.customSemanticsActionIds.map((int id) {
         return CustomSemanticsAction.getAction(id);
       }).toList();
-      final List<CustomSemanticsAction> expectedCustomActions = List<CustomSemanticsAction>.from(customActions ?? const <int>[]);
+      final List<CustomSemanticsAction> expectedCustomActions = customActions?.toList() ?? <CustomSemanticsAction>[];
       if (hintOverrides?.onTapHint != null)
         expectedCustomActions.add(CustomSemanticsAction.overridingAction(hint: hintOverrides.onTapHint, action: SemanticsAction.tap));
       if (hintOverrides?.onLongPressHint != null)

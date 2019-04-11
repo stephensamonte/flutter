@@ -84,10 +84,15 @@ class UpdatePackagesCommand extends FlutterCommand {
   @override
   final bool hidden;
 
+  @override
+  Future<Set<DevelopmentArtifact>> get requiredArtifacts async => <DevelopmentArtifact>{
+    DevelopmentArtifact.universal,
+  };
+
   Future<void> _downloadCoverageData() async {
     final Status status = logger.startProgress(
       'Downloading lcov data for package:flutter...',
-      timeout: kSlowOperation,
+      timeout: timeoutConfiguration.slowOperation,
     );
     final String urlBase = platform.environment['FLUTTER_STORAGE_BASE_URL'] ?? 'https://storage.googleapis.com';
     final List<int> data = await fetchUrl(Uri.parse('$urlBase/flutter_infra/flutter/coverage/lcov.info'));
@@ -909,7 +914,10 @@ class PubspecHeader extends PubspecLine {
 
 /// A dependency, as represented by a line (or two) from a pubspec.yaml file.
 class PubspecDependency extends PubspecLine {
-  PubspecDependency(String line, this.name, this.suffix, {
+  PubspecDependency(
+    String line,
+    this.name,
+    this.suffix, {
     @required this.isTransitive,
     DependencyKind kind,
     this.version,
@@ -1093,7 +1101,7 @@ class PubspecDependency extends PubspecLine {
 
 /// Generates the File object for the pubspec.yaml file of a given Directory.
 File _pubspecFor(Directory directory) {
-  return fs.file('${directory.path}/pubspec.yaml');
+  return fs.file(fs.path.join(directory.path, 'pubspec.yaml'));
 }
 
 /// Generates the source of a fake pubspec.yaml file given a list of

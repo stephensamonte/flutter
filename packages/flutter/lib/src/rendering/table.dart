@@ -881,11 +881,11 @@ class RenderTable extends RenderBox {
         }
         assert(tableWidth >= targetWidth);
       }
-    } else // step 2 and 3 are mutually exclusive
+    } // step 2 and 3 are mutually exclusive
 
     // 3. if there were no flex columns, then grow the table to the
     //    minWidth.
-    if (tableWidth < minWidthConstraint) {
+    else if (tableWidth < minWidthConstraint) {
       final double delta = (minWidthConstraint - tableWidth) / columns;
       for (int x = 0; x < columns; x += 1)
         widths[x] += delta;
@@ -958,8 +958,8 @@ class RenderTable extends RenderBox {
                 deficit -= widths[x] - minWidths[x];
                 widths[x] = minWidths[x];
               } else {
-                deficit -= availableDelta;
-                widths[x] -= availableDelta;
+                deficit -= delta;
+                widths[x] -= delta;
                 newAvailableColumns += 1;
               }
             }

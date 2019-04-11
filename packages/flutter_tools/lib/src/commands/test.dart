@@ -10,6 +10,8 @@ import '../base/file_system.dart';
 import '../base/platform.dart';
 import '../cache.dart';
 import '../codegen.dart';
+import '../dart/pub.dart';
+import '../globals.dart';
 import '../project.dart';
 import '../runner/flutter_command.dart';
 import '../test/coverage_collector.dart';
@@ -17,7 +19,7 @@ import '../test/event_printer.dart';
 import '../test/runner.dart';
 import '../test/watcher.dart';
 
-class TestCommand extends FlutterCommand {
+class TestCommand extends FastFlutterCommand {
   TestCommand({ bool verboseHelp = false }) {
     requiresPubspecYaml();
     usesPubOption();
@@ -85,14 +87,19 @@ class TestCommand extends FlutterCommand {
   }
 
   @override
+  Future<Set<DevelopmentArtifact>> get requiredArtifacts async => <DevelopmentArtifact>{
+    DevelopmentArtifact.universal,
+  };
+
+  @override
   String get name => 'test';
 
   @override
   String get description => 'Run Flutter unit tests for the current project.';
 
   @override
-  Future<void> validateCommand() async {
-    await super.validateCommand();
+  Future<FlutterCommandResult> runCommand() async {
+    await cache.updateAll(await requiredArtifacts);
     if (!fs.isFileSync('pubspec.yaml')) {
       throwToolExit(
         'Error: No pubspec.yaml file found in the current working directory.\n'
@@ -100,10 +107,9 @@ class TestCommand extends FlutterCommand {
         'called *_test.dart and must reside in the package\'s \'test\' '
         'directory (or one of its subdirectories).');
     }
-  }
-
-  @override
-  Future<FlutterCommandResult> runCommand() async {
+    if (shouldRunPub) {
+      await pubGet(context: PubContext.getVerifyContext(name), skipPubspecYamlCheck: true);
+    }
     final List<String> names = argResults['name'];
     final List<String> plainNames = argResults['plain-name'];
     final FlutterProject flutterProject = await FlutterProject.current();
@@ -161,7 +167,7 @@ class TestCommand extends FlutterCommand {
     Cache.releaseLockEarly();
 
     // Run builders once before all tests.
-    if (experimentalBuildEnabled && await flutterProject.hasBuilders) {
+    if (flutterProject.hasBuilders) {
       final CodegenDaemon codegenDaemon = await codeGenerator.daemon(flutterProject);
       codegenDaemon.startBuild();
       await for (CodegenStatus status in codegenDaemon.buildResults) {
