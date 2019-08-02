@@ -6,6 +6,7 @@ import 'dart:async';
 
 import '../base/common.dart';
 import '../base/file_system.dart';
+import '../base/platform.dart';
 import '../build_info.dart';
 import '../globals.dart';
 import '../project.dart';
@@ -27,14 +28,17 @@ class CleanCommand extends FlutterCommand {
 
   @override
   Future<FlutterCommandResult> runCommand() async {
-    final FlutterProject flutterProject = await FlutterProject.current();
+    final FlutterProject flutterProject = FlutterProject.current();
     final Directory buildDir = fs.directory(getBuildDirectory());
 
     printStatus("Deleting '${buildDir.path}${fs.path.separator}'.");
     if (buildDir.existsSync()) {
       try {
         buildDir.deleteSync(recursive: true);
-      } catch (error) {
+      } on FileSystemException catch (error) {
+        if (platform.isWindows) {
+          _windowsDeleteFailure(buildDir.path);
+        }
         throwToolExit(error.toString());
       }
     }
@@ -43,11 +47,22 @@ class CleanCommand extends FlutterCommand {
     if (flutterProject.dartTool.existsSync()) {
       try {
         flutterProject.dartTool.deleteSync(recursive: true);
-      } catch (error) {
+      } on FileSystemException catch (error) {
+        if (platform.isWindows) {
+          _windowsDeleteFailure(flutterProject.dartTool.path);
+        }
         throwToolExit(error.toString());
       }
     }
     return const FlutterCommandResult(ExitStatus.success);
+  }
+
+  void _windowsDeleteFailure(String path) {
+    printError(
+      'Failed to remove $path. '
+      'A program may still be using a file in the directory or the directory itself. '
+      'To find and stop such a program, see: '
+      'https://superuser.com/questions/1333118/cant-delete-empty-folder-because-it-is-used');
   }
 }
 

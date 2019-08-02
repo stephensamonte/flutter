@@ -8,6 +8,7 @@ import '../application_package.dart';
 import '../base/file_system.dart';
 import '../globals.dart';
 import '../ios/plist_utils.dart' as plist;
+import '../project.dart';
 
 /// Tests whether a [FileSystemEntity] is an macOS bundle directory
 bool _isBundleDirectory(FileSystemEntity entity) =>
@@ -15,6 +16,11 @@ bool _isBundleDirectory(FileSystemEntity entity) =>
 
 abstract class MacOSApp extends ApplicationPackage {
   MacOSApp({@required String projectBundleId}) : super(id: projectBundleId);
+
+  /// Creates a new [MacOSApp] from a macOS project directory.
+  factory MacOSApp.fromMacOSProject(MacOSProject project) {
+    return BuildableMacOSApp(project);
+  }
 
   /// Creates a new [MacOSApp] from an existing app bundle.
   ///
@@ -24,21 +30,32 @@ abstract class MacOSApp extends ApplicationPackage {
   /// which is expected to start the application and send the observatory
   /// port over stdout.
   factory MacOSApp.fromPrebuiltApp(FileSystemEntity applicationBinary) {
-    final FileSystemEntityType entityType = fs.typeSync(applicationBinary.path);
+    final ExecutableAndId executableAndId = executableFromBundle(applicationBinary);
+    final Directory applicationBundle = fs.directory(applicationBinary);
+    return PrebuiltMacOSApp(
+      bundleDir: applicationBundle,
+      bundleName: applicationBundle.path,
+      executableAndId: executableAndId,
+    );
+  }
+
+  /// Look up the executable name for a macOS application bundle.
+  static ExecutableAndId executableFromBundle(Directory applicationBundle) {
+    final FileSystemEntityType entityType = fs.typeSync(applicationBundle.path);
     if (entityType == FileSystemEntityType.notFound) {
-      printError('File "${applicationBinary.path}" does not exist.');
+      printError('File "${applicationBundle.path}" does not exist.');
       return null;
     }
     Directory bundleDir;
     if (entityType == FileSystemEntityType.directory) {
-      final Directory directory = fs.directory(applicationBinary);
+      final Directory directory = fs.directory(applicationBundle);
       if (!_isBundleDirectory(directory)) {
-        printError('Folder "${applicationBinary.path}" is not an app bundle.');
+        printError('Folder "${applicationBundle.path}" is not an app bundle.');
         return null;
       }
-      bundleDir = fs.directory(applicationBinary);
+      bundleDir = fs.directory(applicationBundle);
     } else {
-      printError('Folder "${applicationBinary.path}" is not an app bundle.');
+      printError('Folder "${applicationBundle.path}" is not an app bundle.');
       return null;
     }
     final String plistPath = fs.path.join(bundleDir.path, 'Contents', 'Info.plist');
@@ -55,37 +72,43 @@ abstract class MacOSApp extends ApplicationPackage {
     final String executable = fs.path.join(bundleDir.path, 'Contents', 'MacOS', executableName);
     if (!fs.file(executable).existsSync()) {
       printError('Could not find macOS binary at $executable');
-      return null;
     }
-    return PrebuiltMacOSApp(
-      bundleDir: bundleDir,
-      bundleName: fs.path.basename(bundleDir.path),
-      projectBundleId: id,
-      executable: executable,
-    );
+    return ExecutableAndId(executable, id);
   }
 
   @override
   String get displayName => id;
-
-  String get executable;
 }
 
 class PrebuiltMacOSApp extends MacOSApp {
   PrebuiltMacOSApp({
     @required this.bundleDir,
     @required this.bundleName,
-    @required this.projectBundleId,
-    @required this.executable,
-  }) : super(projectBundleId: projectBundleId);
+    @required this.executableAndId,
+  });
 
   final Directory bundleDir;
   final String bundleName;
-  final String projectBundleId;
-
-  @override
-  final String executable;
+  final ExecutableAndId executableAndId;
 
   @override
   String get name => bundleName;
+
+  String get executable => executableAndId.executable;
+}
+
+class BuildableMacOSApp extends MacOSApp {
+  BuildableMacOSApp(this.project);
+
+  final MacOSProject project;
+
+  @override
+  String get name => 'macOS';
+}
+
+class ExecutableAndId {
+  ExecutableAndId(this.executable, this.id);
+
+  final String executable;
+  final String id;
 }

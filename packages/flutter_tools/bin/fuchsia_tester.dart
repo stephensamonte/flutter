@@ -16,11 +16,11 @@ import 'package:flutter_tools/src/cache.dart';
 import 'package:flutter_tools/src/context_runner.dart';
 import 'package:flutter_tools/src/dart/package_map.dart';
 import 'package:flutter_tools/src/artifacts.dart';
-import 'package:flutter_tools/src/disabled_usage.dart';
 import 'package:flutter_tools/src/globals.dart';
+import 'package:flutter_tools/src/project.dart';
+import 'package:flutter_tools/src/reporting/reporting.dart';
 import 'package:flutter_tools/src/test/coverage_collector.dart';
 import 'package:flutter_tools/src/test/runner.dart';
-import 'package:flutter_tools/src/usage.dart';
 
 // This was largely inspired by lib/src/commands/test.dart.
 
@@ -115,7 +115,15 @@ Future<void> run(List<String> args) async {
     Directory testDirectory;
     CoverageCollector collector;
     if (argResults['coverage']) {
-      collector = CoverageCollector();
+      collector = CoverageCollector(
+        libraryPredicate: (String libraryName) {
+          // If we have a specified coverage directory then accept all libraries.
+          if (coverageDirectory != null) {
+            return true;
+          }
+          final String projectName = FlutterProject.current().manifest.appName;
+          return libraryName.contains(projectName);
+        });
       if (!argResults.options.contains(_kOptionTestDirectory)) {
         throwToolExit('Use of --coverage requires setting --test-directory');
       }
@@ -141,6 +149,7 @@ Future<void> run(List<String> args) async {
       precompiledDillFiles: tests,
       concurrency: math.max(1, platform.numberOfProcessors - 2),
       icudtlPath: fs.path.absolute(argResults[_kOptionIcudtl]),
+      coverageDirectory: coverageDirectory,
     );
 
     if (collector != null) {

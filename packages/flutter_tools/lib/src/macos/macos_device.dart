@@ -8,22 +8,33 @@ import '../base/os.dart';
 import '../base/platform.dart';
 import '../base/process_manager.dart';
 import '../build_info.dart';
-import '../convert.dart';
+import '../cache.dart';
+import '../desktop.dart';
 import '../device.dart';
 import '../globals.dart';
 import '../macos/application_package.dart';
+import '../project.dart';
 import '../protocol_discovery.dart';
+import 'build_macos.dart';
 import 'macos_workflow.dart';
 
 /// A device that represents a desktop MacOS target.
 class MacOSDevice extends Device {
-  MacOSDevice() : super('macOS');
+  MacOSDevice() : super(
+      'macOS',
+      category: Category.desktop,
+      platformType: PlatformType.macos,
+      ephemeral: false,
+  );
 
   @override
   void clearLogs() { }
 
   @override
-  DeviceLogReader getLogReader({ ApplicationPackage app }) => NoOpDeviceLogReader('macos');
+  DeviceLogReader getLogReader({ ApplicationPackage app }) {
+    return _deviceLogReader;
+  }
+  final DesktopLogReader _deviceLogReader = DesktopLogReader();
 
   // Since the host and target devices are the same, no work needs to be done
   // to install the application.
@@ -44,6 +55,9 @@ class MacOSDevice extends Device {
   Future<bool> get isLocalEmulator async => false;
 
   @override
+  Future<String> get emulatorId async => null;
+
+  @override
   bool isSupported() => true;
 
   @override
@@ -54,6 +68,8 @@ class MacOSDevice extends Device {
 
   @override
   Future<String> get sdkNameAndVersion async => os.name;
+
+  String _cachedExecutable;
 
   @override
   Future<LaunchResult> startApp(
@@ -66,16 +82,42 @@ class MacOSDevice extends Device {
     bool usesTerminalUi = true,
     bool ipv6 = false,
   }) async {
-    if (!prebuiltApplication) {
+    Cache.releaseLockEarly();
+    // Stop any running applications with the same executable.
+    PrebuiltMacOSApp prebuiltMacOSApp;
+    if (prebuiltApplication) {
+      prebuiltMacOSApp = package;
+    } else {
+      prebuiltMacOSApp = await buildMacOS(
+        flutterProject: FlutterProject.current(),
+        buildInfo: debuggingOptions?.buildInfo,
+        targetOverride: mainPath,
+      );
+    }
+    _cachedExecutable = prebuiltMacOSApp.executable;
+
+    // Ensure that the executable is locatable.
+    if (prebuiltMacOSApp == null) {
+      printError('Unable to find executable to run');
       return LaunchResult.failed();
     }
-    // Stop any running applications with the same executable.
-    await stopApp(package);
-    final Process process = await processManager.start(<String>[package.executable]);
-    final MacOSLogReader logReader = MacOSLogReader(package, process);
-    final ProtocolDiscovery observatoryDiscovery = ProtocolDiscovery.observatory(logReader);
+
+    // Make sure to call stop app after we've built.
+    await stopApp(prebuiltMacOSApp);
+    final Process process = await processManager.start(<String>[
+      prebuiltMacOSApp.executable,
+    ]);
+    if (debuggingOptions?.buildInfo?.isRelease == true) {
+      return LaunchResult.succeeded();
+    }
+    _deviceLogReader.initializeProcess(process);
+    final ProtocolDiscovery observatoryDiscovery = ProtocolDiscovery.observatory(_deviceLogReader);
     try {
       final Uri observatoryUri = await observatoryDiscovery.uri;
+      // Bring app to foreground.
+      await processManager.run(<String>[
+        'open', prebuiltMacOSApp.bundleName,
+      ]);
       return LaunchResult.succeeded(observatoryUri: observatoryUri);
     } catch (error) {
       printError('Error waiting for a debug connection: $error');
@@ -89,35 +131,7 @@ class MacOSDevice extends Device {
   // currently we rely on killing the isolate taking down the application.
   @override
   Future<bool> stopApp(covariant MacOSApp app) async {
-    final RegExp whitespace = RegExp(r'\s+');
-    bool succeeded = true;
-    try {
-      final ProcessResult result = await processManager.run(<String>[
-        'ps', 'aux',
-      ]);
-      if (result.exitCode != 0) {
-        return false;
-      }
-      final List<String> lines = result.stdout.split('\n');
-      for (String line in lines) {
-        if (!line.contains(app.executable)) {
-          continue;
-        }
-        final List<String> values = line.split(whitespace);
-        if (values.length < 2) {
-          continue;
-        }
-        final String pid = values[1];
-        final ProcessResult killResult = await processManager.run(<String>[
-          'kill', pid,
-        ]);
-        succeeded &= killResult.exitCode == 0;
-      }
-      return true;
-    } on ArgumentError {
-      succeeded = false;
-    }
-    return succeeded;
+    return killProcess(_cachedExecutable);
   }
 
   @override
@@ -127,6 +141,11 @@ class MacOSDevice extends Device {
   // to uninstall the application.
   @override
   Future<bool> uninstallApp(ApplicationPackage app) async => true;
+
+  @override
+  bool isSupportedForProject(FlutterProject flutterProject) {
+    return flutterProject.macos.existsSync();
+  }
 }
 
 class MacOSDevices extends PollingDeviceDiscovery {
@@ -150,19 +169,4 @@ class MacOSDevices extends PollingDeviceDiscovery {
 
   @override
   Future<List<String>> getDiagnostics() async => const <String>[];
-}
-
-class MacOSLogReader extends DeviceLogReader {
-  MacOSLogReader(this.macOSApp, this.process);
-
-  final MacOSApp macOSApp;
-  final Process process;
-
-  @override
-  Stream<String> get logLines {
-    return process.stdout.transform(utf8.decoder);
-  }
-
-  @override
-  String get name => macOSApp.displayName;
 }
